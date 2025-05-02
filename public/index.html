@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API Signup</title>
+</head>
+<body>
+  <h1>Signup Form</h1>
+
+  <!-- نموذج التسجيل -->
+  <div id="signupForm">
+    <form id="signup">
+      <input type="text" id="nom" placeholder="Nom" required><br>
+      <input type="text" id="prenom" placeholder="Prenom" required><br>
+      <input type="email" id="email" placeholder="Email" required><br>
+      <input type="password" id="mot_de_passe" placeholder="Mot de passe" required><br>
+      <input type="text" id="telephone" placeholder="Telephone" required><br>
+      <input type="text" id="adresse" placeholder="Adresse" required><br>
+      <button type="submit">Sign Up</button>
+    </form>
+  </div>
+
+  <!-- نموذج إدخال كود التحقق -->
+  <div id="verifyForm" style="display:none;">
+    <h2>Enter the verification code</h2>
+    <form id="verify">
+      <input type="text" id="verificationCode" placeholder="Verification Code" required><br>
+      <button type="submit">Verify</button>
+    </form>
+  </div>
+
+  <script>
+    let savedEmail = ""; // متغير لحفظ الإيميل بعد التسجيل
+
+    // معالجة التسجيل
+    document.getElementById('signup').addEventListener('submit', async (event) => {
+      event.preventDefault();
+
+      const userData = { 
+        nom: document.getElementById('nom').value,
+        prenom: document.getElementById('prenom').value,
+        email: document.getElementById('email').value,
+        mot_de_passe: document.getElementById('mot_de_passe').value,
+        telephone: document.getElementById('telephone').value,
+        adresse: document.getElementById('adresse').value,
+      };
+
+      try {
+        const response = await fetch('http://localhost:3000/signup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(userData),
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          savedEmail = userData.email; // نحفظ الإيميل
+          alert(data.message);
+          document.getElementById("signupForm").style.display = "none";
+          document.getElementById("verifyForm").style.display = "block";
+        } else {
+          alert('Error: ' + data.error);
+        }
+      } catch (error) {
+        alert('Error: ' + error.message);
+      }
+    });
+
+    // معالجة التحقق من الكود
+    document.getElementById('verify').addEventListener('submit', async (event) => {
+      event.preventDefault();
+
+      const verificationCode = document.getElementById('verificationCode').value;
+
+      console.log('Sending for verification:', {
+        email: savedEmail,
+        verificationCode: verificationCode
+      });
+
+      const response = await fetch('http://localhost:3000/verify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: savedEmail,  // نرسل الإيميل المحفوظ
+          verificationCode: verificationCode
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        alert(data.message);
+      } else {
+        alert('Error: ' + data.error);
+      }
+    });
+  </script>
+</body>
+</html>
