@@ -1,182 +1,300 @@
 const bcrypt = require('bcrypt');
-const { Pool } = require('pg');
-const { sendVerificationEmail } = require('../services/emailService');
+const nodemailer = require('nodemailer');
+const pool = require('../db');
+const emailService = require('../services/emailService');
 
-// Configuration de la pool de connexions
-const pool = new Pool({
-  user: process.env.PG_USER || 'postgres',
-  host: process.env.PG_HOST || 'localhost',
-  database: process.env.PG_DATABASE || 'depannage',
-  password: process.env.PG_PASSWORD || 'meriem2025!',
-  port: process.env.PG_PORT || 5432,
-});
+module.exports.signup = async (req, res) => {
+  try {
+    console.log("Signup route hit");
+    console.log('Request body:', req.body);
+    
+    // Destructuration avec les bons noms de champs
+    const { nom, prenom, email, mot_de_passe, telephone, adresse } = req.body;
 
-module.exports = {
-  signup: async (req, res) => {
+    // Validation des champs obligatoires
+    if (!nom || !prenom || !email || !mot_de_passe || !telephone || !adresse) {
+      return res.status(400).json({ 
+        error: 'Tous les champs sont obligatoires',
+        missing: {
+          nom: !nom,
+          prenom: !prenom,
+          email: !email,
+          mot_de_passe: !mot_de_passe,
+          telephone: !telephone,
+          adresse: !adresse
+        }
+      });
+    }
+
+    // Validation du mot de passe
+    if (!mot_de_passe || mot_de_passe.trim() === "" || mot_de_passe.length < 8) {
+      return res.status(400).json({ 
+        error: 'Le mot de passe doit contenir au moins 8 caractères' 
+      });
+    }
+
+    // Validation de l'email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ 
+        error: 'Format d\'email invalide' 
+      });
+    }
+
+    // Vérification que l'email n'existe pas déjà
+    const checkEmailQuery = 'SELECT * FROM "User" WHERE email = $1';
+    const result = await pool.query(checkEmailQuery, [email.toLowerCase()]);
+    
+    if (result.rows.length > 0) {
+      return res.status(400).json({ 
+        error: 'Cette adresse email est déjà utilisée' 
+      });
+    }
+
+    // Chiffrement du mot de passe
+    const saltRounds = 12; // Augmenté pour plus de sécurité
+    const hashedPassword = await bcrypt.hash(mot_de_passe, saltRounds);
+
+    // Transaction pour insérer l'utilisateur et le client
+    const client = await pool.connect();
+    
     try {
-      // 1. Validation des données
-      const { nom, prenom, email, mot_de_passe, telephone, adresse } = req.body;
+      await client.query('BEGIN');
 
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        return res.status(400).json({ error: 'Email invalide' });
-      }
+      // Insertion de l'utilisateur
+      const insertUserQuery = `
+        INSERT INTO "User" (nom, prenom, email, mot_de_passe, telephone, adresse, created_at) 
+        VALUES ($1, $2, $3, $4, $5, $6, NOW()) 
+        RETURNING *
+      `;
+      const newUserResult = await client.query(insertUserQuery, [
+        nom.trim(), 
+        prenom.trim(), 
+        email.toLowerCase().trim(), 
+        hashedPassword, 
+        telephone.trim(), 
+        adresse.trim()
+      ]);
 
-      if (!mot_de_passe || mot_de_passe.length < 8) {
-        return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères' });
-      }
+      const newUser = newUserResult.rows[0];
+      console.log('User created:', { id: newUser.id, email: newUser.email });
 
-      // 2. Vérification de l'email existant
-      const checkEmailQuery = 'SELECT * FROM "User" WHERE email = $1';
-      const emailCheck = await pool.query(checkEmailQuery, [email]);
-      if (emailCheck.rows.length > 0) {
-        return res.status(409).json({ error: 'Email déjà utilisé' });
-      }
-
-      // 3. Hachage du mot de passe
-      const hashedPassword = await bcrypt.hash(mot_de_passe, 12);
+      // Génération du code de vérification
       const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+      console.log('Verification Code generated:', verificationCode);
 
-      // 4. Insertion dans la base de données
-      const { rows: [user] } = await pool.query(
-        `INSERT INTO "User" 
-         (nom, prenom, email, mot_de_passe, telephone, adresse) 
-         VALUES ($1, $2, $3, $4, $5, $6) 
-         RETURNING id, email`,
-        [nom, prenom, email, hashedPassword, telephone, adresse]
-      );
+      // Insertion du client
+      const insertClientQuery = `
+        INSERT INTO client (nom, prenom, email, telephone, adresse, user_id, verification_code, created_at) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        RETURNING *
+      `;
+      const clientResult = await client.query(insertClientQuery, [
+        nom.trim(), 
+        prenom.trim(), 
+        email.toLowerCase().trim(), 
+        telephone.trim(), 
+        adresse.trim(), 
+        newUser.id, 
+        verificationCode
+      ]);
 
-      // 5. Insertion dans la table client
-     // await pool.query(
-        //`INSERT INTO client 
-        // (nom, prenom, email, telephone, adresse, user_id, verification_code) 
-        // VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        //[nom, prenom, email, telephone, adresse, user.id, verificationCode]
-      //);
+      console.log('Client created:', { id: clientResult.rows[0].id, email: clientResult.rows[0].email });
 
-      // 6. Envoi d'email de vérification
-      //await sendVerificationEmail(email, verificationCode);
+      // Envoi de l'email de vérification
+      try {
+        await emailService.sendVerificationEmail(email.toLowerCase().trim(), verificationCode);
+        console.log('Verification email sent successfully');
+      } catch (emailError) {
+        console.error('Failed to send verification email:', emailError);
+        // On continue même si l'email échoue, mais on le signale
+        await client.query('ROLLBACK');
+        return res.status(500).json({ 
+          error: 'Utilisateur créé mais impossible d\'envoyer l\'email de vérification. Veuillez contacter le support.' 
+        });
+      }
 
-      // 7. Réponse
-      res.status(201).json({
-        success: true,
-        message: 'Code de vérification envoyé avec succès',
-         user: {
-          id: user.id,
-          email: user.email,
-          nom: user.nom,
-          prenom: user.prenom
+      await client.query('COMMIT');
+
+      res.status(201).json({ 
+        message: 'Inscription réussie ! Un code de vérification a été envoyé à votre adresse email.',
+        data: {
+          userId: newUser.id,
+          email: newUser.email,
+          nom: newUser.nom,
+          prenom: newUser.prenom
         }
       });
 
-    } catch (err) {
-      console.error('Erreur inscription:', err);
-      
-      if (err.code === '23505') { // Violation de contrainte unique
-        return res.status(409).json({ error: 'Email déjà utilisé' });
-      }
-
-      if (err.code === '23502') { // Violation de NOT NULL
-        return res.status(400).json({ error: 'Champ obligatoire manquant' });
-      }
-
-      res.status(500).json({ error: 'Erreur serveur, veuillez réessayer plus tard.' });
+    } catch (transactionError) {
+      await client.query('ROLLBACK');
+      throw transactionError;
+    } finally {
+      client.release();
     }
-  },
 
-  verifyEmail: async (req, res) => {
-    try {
-      // التأكد من أن الطلب يحتوي على محتوى JSON
-      if (!req.is('application/json')) {
-        return res.status(415).json({ error: 'Content-Type must be application/json' });
-      }
-
-      const { email, verificationCode } = req.body;
-
-      // 1. Validation des données
-      if (!email || !verificationCode) {
-        return res.status(400).json({ 
-          error: 'Email et code de vérification sont requis',
-          received_data: req.body // لأغراض debugging
-        });
-      }
-
-      // 2. Vérification du code
-      const clientQuery = 'SELECT * FROM client WHERE email = $1';
-      const clientResult = await pool.query(clientQuery, [email]);
-
-      if (clientResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Email non trouvé' });
-      }
-
-      if (clientResult.rows[0].verificationCode !== verificationCode.trim()) {
-        return res.status(400).json({ error: 'Code de vérification invalide' });
-      }
-
-      // 3. Mise à jour de la vérification
-      const updateVerificationQuery = 'UPDATE client SET id_verified = true WHERE email = $1';
-      await pool.query(updateVerificationQuery, [email]);
-      
-      // 4. Réponse
-      res.status(200).json({ 
-        success: true,
-        message: 'Email vérifié avec succès!' 
-      });
-
-    } catch (error) {
-      console.error('Erreur dans verifyEmail:', error);
-      res.status(500).json({ 
-        error: 'Erreur serveur lors de la vérification de l\'email',
-        details: error.message // إضافة تفاصيل الخطأ للإصلاح
+  } catch (error) {
+    console.error('Error in signup:', error.message);
+    console.error('Full error:', error);
+    
+    // Gestion spécifique des erreurs PostgreSQL
+    if (error.code === '23505') { // Violation de contrainte unique
+      return res.status(400).json({ 
+        error: 'Cette adresse email est déjà utilisée' 
       });
     }
-  },
-
-  
-  login: async (req, res) => {
-    try {
-      const { email, mot_de_passe } = req.body;
-
-      if (!email || !mot_de_passe) {
-        return res.status(400).json({ error: "Email et mot de passe sont requis" });
-      }
-
-      const userQuery = 'SELECT * FROM "client" WHERE email = $1';
-      const userResult = await pool.query(userQuery, [email]);
-
-      if (userResult.rows.length === 0) {
-        return res.status(401).json({ error: "Email ou mot de passe incorrect" });
-      }
-
-      const client = userResult.rows[0];
-
-      if (mot_de_passe !== client.mot_de_passe) {
-        return res.status(401).json({ error: "Email ou mot de passe incorrect" });
-      }
-
-      const clientCheck = await pool.query(
-        'SELECT id_verified FROM client WHERE client_id = $1',
-        [client.id]
-      );
-      if (clientCheck.rows.length > 0 && !clientCheck.rows[0].id_verified) {
-        return res.status(403).json({
-          error: "Veuillez vérifier votre email avant de vous connecter",
-        });
-      }
-
-      res.status(200).json({
-        success: true,
-        message: "Connexion réussie",
-        user: {
-          id: client.id,
-          email: client.email,
-          nom: client.nom,
-          prenom: client.prenom,
-          role: "client"
-        },
+    
+    if (error.code === '23502') { // Violation de contrainte NOT NULL
+      return res.status(400).json({ 
+        error: 'Tous les champs obligatoires doivent être remplis' 
       });
-    } catch (error) {
-      console.error("Erreur dans login:", error);
-      res.status(500).json({ error: "Erreur serveur lors de la connexion" });
     }
-  },
+
+    res.status(500).json({ 
+      error: 'Erreur interne du serveur lors de l\'inscription',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+module.exports.verifyEmail = async (req, res) => {
+  try {
+    const { email, verificationCode } = req.body;
+
+    // Validation des données d'entrée
+    if (!email || !verificationCode) {
+      return res.status(400).json({ 
+        error: 'Email et code de vérification sont requis' 
+      });
+    }
+
+    const trimmedEmail = email.toLowerCase().trim();
+    const trimmedCode = verificationCode.toString().trim();
+
+    // Recherche du client avec le code de vérification
+    const clientQuery = `
+      SELECT * FROM client 
+      WHERE email = $1 AND verification_code = $2 AND id_verified = false
+    `;
+    
+    const clientResult = await pool.query(clientQuery, [trimmedEmail, trimmedCode]);
+    
+    if (clientResult.rows.length === 0) {
+      return res.status(400).json({ 
+        error: 'Code de vérification invalide ou email déjà vérifié' 
+      });
+    }
+
+    // Vérification de l'expiration du code (optionnel - ajouter une colonne expires_at)
+    // const client = clientResult.rows[0];
+    // if (client.expires_at && new Date() > client.expires_at) {
+    //   return res.status(400).json({ error: 'Code de vérification expiré' });
+    // }
+
+    // Mise à jour du statut de vérification
+    const updateVerificationQuery = `
+      UPDATE client 
+      SET id_verified = true, verification_code = NULL, verified_at = NOW() 
+      WHERE email = $1 AND verification_code = $2
+      RETURNING *
+    `;
+    
+    const updateResult = await pool.query(updateVerificationQuery, [trimmedEmail, trimmedCode]);
+    
+    if (updateResult.rows.length === 0) {
+      return res.status(500).json({ 
+        error: 'Erreur lors de la vérification' 
+      });
+    }
+
+    console.log('Email verified successfully for:', trimmedEmail);
+    
+    res.status(200).json({ 
+      message: 'Email vérifié avec succès ! Vous pouvez maintenant vous connecter.',
+      data: {
+        email: updateResult.rows[0].email,
+        verified: true
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in verifyEmail:', error.message);
+    console.error('Full error:', error);
+    
+    res.status(500).json({ 
+      error: 'Erreur interne du serveur lors de la vérification',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+module.exports.login = async (req, res) => {
+  try {
+    const { email, mot_de_passe } = req.body;
+
+    // Validation des données d'entrée
+    if (!email || !mot_de_passe) {
+      return res.status(400).json({ 
+        error: 'Email et mot de passe sont requis' 
+      });
+    }
+
+    const trimmedEmail = email.toLowerCase().trim();
+
+    // Recherche de l'utilisateur
+    const userQuery = 'SELECT * FROM "User" WHERE email = $1';
+    const userResult = await pool.query(userQuery, [trimmedEmail]);
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ 
+        error: 'Email ou mot de passe incorrect' 
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // Vérification du mot de passe
+    const isPasswordValid = await bcrypt.compare(mot_de_passe, user.mot_de_passe);
+    
+    if (!isPasswordValid) {
+      return res.status(401).json({ 
+        error: 'Email ou mot de passe incorrect' 
+      });
+    }
+
+    // Vérification que l'email est vérifié (optionnel)
+    const clientQuery = 'SELECT id_verified FROM client WHERE email = $1';
+    const clientResult = await pool.query(clientQuery, [trimmedEmail]);
+    
+    if (clientResult.rows.length > 0 && !clientResult.rows[0].id_verified) {
+      return res.status(403).json({ 
+        error: 'Veuillez vérifier votre adresse email avant de vous connecter' 
+      });
+    }
+
+    // Mise à jour de la dernière connexion
+    const updateLoginQuery = 'UPDATE "User" SET last_login = NOW() WHERE id = $1';
+    await pool.query(updateLoginQuery, [user.id]);
+
+    console.log('User logged in successfully:', trimmedEmail);
+
+    res.status(200).json({ 
+      message: 'Connexion réussie',
+      data: {
+        userId: user.id,
+        email: user.email,
+        nom: user.nom,
+        prenom: user.prenom
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in login:', error.message);
+    console.error('Full error:', error);
+    
+    res.status(500).json({ 
+      error: 'Erreur interne du serveur lors de la connexion',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 };
